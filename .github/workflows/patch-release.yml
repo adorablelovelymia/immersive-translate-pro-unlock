@@ -1,0 +1,85 @@
+name: patch-release
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch latest upstream release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api repos/immersive-translate/immersive-translate/releases/latest \
+            --jq '.tag_name' > tag.txt
+          echo "tag=$(cat tag.txt)" >> "$GITHUB_OUTPUT"
+          echo "latest upstream tag: $(cat tag.txt)"
+
+      - name: Check if already processed
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="$(cat tag.txt)"
+          if gh release view "$TAG-patched" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "already processed $TAG, skipping"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download upstream assets
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="$(cat tag.txt)"
+          mkdir -p assets
+          gh release download "$TAG" -R immersive-translate/immersive-translate -D assets
+          ls -la assets
+
+      - name: Patch and repackage
+        if: steps.check.outputs.skip != 'true'
+        run: |
+          TAG="$(cat tag.txt)"
+          VER="${TAG#v}"
+          mkdir -p dist
+
+          FF=$(ls assets/firefox-*.zip)
+          mkdir -p ff && (cd ff && unzip -qo "../$FF")
+          python3 patch.py ff
+          (cd ff && zip -q -r "../dist/firefox-immersive-translate-${VER}-patched.xpi" . -x 'META-INF/*')
+          rm -rf ff
+
+          CH=$(ls assets/chrome-*.zip)
+          mkdir -p ch && (cd ch && unzip -qo "../$CH")
+          python3 patch.py ch
+          (cd ch && zip -q -r "../dist/chrome-immersive-translate-${VER}-patched.zip" . -x 'META-INF/*')
+          rm -rf ch
+
+          US=$(ls assets/*.user.js)
+          cp "$US" "dist/immersive-translate-${VER}-patched.user.js"
+          python3 patch.py "dist/immersive-translate-${VER}-patched.user.js"
+
+          echo "=== dist ==="
+          ls -la dist
+
+      - name: Publish release
+        if: steps.check.outputs.skip != 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TAG="$(cat tag.txt)"
+          gh release create "$TAG-patched" \
+            dist/* \
+            --title "$TAG (Pro/Max unlocked)" \
+            --notes "Patched build of upstream $TAG. Pro/Max client-side checks bypassed. See README for install instructions."
